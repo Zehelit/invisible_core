@@ -12,12 +12,13 @@ import subprocess
 import sys
 import tempfile
 
+import psutil
 import pytest
 
 from invisible_core._owned_dirs import sweep_owned_dirs
-from invisible_core.juggler import SessionFiles
+from invisible_core.juggler import SessionFiles, _profile
 from invisible_core.juggler._profile import PROFILE_PREFIX, TMP_PREFIX
-from invisible_core.process import TOKEN_VAR, SessionToken
+from invisible_core.process import TOKEN_VAR, SessionToken, terminate
 
 pytestmark = pytest.mark.unit
 
@@ -134,7 +135,66 @@ def test_removing_twice_is_harmless_and_without_a_token_no_process_is_looked_for
     assert not pathlib.Path(files.profile).exists()
 
 
-def test_a_child_that_outlives_the_browser_is_ended_before_the_profile_goes():
+def test_the_ping_sender_is_let_finish_before_the_profile_goes(tmp_path):
+    """⛔ KNOWN-BAD, measured on both platforms (B266): `remove()` ended every
+    survivor at once, and the survivor is the shutdown-ping sender, so its
+    POST was lost or cut in half. A real child stands in for it: it carries the
+    session's token, holds the ping, and after a second deletes it and writes a
+    marker OUTSIDE the profile, which it reaches only by running to the end.
+
+    The marker, not the exit code: on POSIX psutil reaps the child while it
+    waits for it, and `Popen.wait()` then answers 0 for a process that was
+    ended as well."""
+    token = SessionToken.mint()
+    files = SessionFiles(env=dict(os.environ, **{TOKEN_VAR: token.value}))
+    ping = pathlib.Path(files.profile, "saved-telemetry-pings", "ping")
+    ping.parent.mkdir()
+    ping.write_bytes(b"{}")
+    done = tmp_path / "sent"
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         "import os, sys, time\n"
+         "print('sending', flush=True)\n"
+         "time.sleep(1)\n"
+         "os.remove(sys.argv[1])\n"
+         "open(sys.argv[2], 'w').close()\n", str(ping), str(done)],
+        env=files.env, stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "sending"
+        files.remove()
+        assert done.exists(), "the sender was ended instead of being let finish"
+        assert not pathlib.Path(files.profile).exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+        files.remove()
+
+
+def test_terminate_does_not_count_what_exits_within_the_grace(tmp_path):
+    """The quick one writes its marker at the end of its own run; the slow one
+    would write it only after 60 s. Markers, not exit codes, for the reason in
+    the test above."""
+    quick_done, slow_done = tmp_path / "quick", tmp_path / "slow"
+    code = "import sys, time; time.sleep(float(sys.argv[1])); open(sys.argv[2], 'w').close()"
+    quick = subprocess.Popen([sys.executable, "-c", code, "0.5", str(quick_done)])
+    slow = subprocess.Popen([sys.executable, "-c", code, "60", str(slow_done)])
+    try:
+        procs = [psutil.Process(quick.pid), psutil.Process(slow.pid)]
+        assert terminate(procs, grace=5.0, timeout=5.0) == 1, (
+            "only the one still running after the grace is sent anything")
+        assert quick_done.exists(), "the quick one was ended, not waited for"
+        slow.wait(timeout=5)
+        assert not slow_done.exists(), (
+            "the slow one outlived the grace and was not ended")
+    finally:
+        for p in (quick, slow):
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+
+
+def test_a_child_that_outlives_the_browser_is_ended_before_the_profile_goes(monkeypatch):
     """⛔ KNOWN-BAD, measured on Windows: at exit the browser hands its shutdown
     ping to `pingsender.exe`, a child that outlives it with the ping file inside
     the profile open. The removal failed on that file, the child then deleted
@@ -142,7 +202,9 @@ def test_a_child_that_outlives_the_browser_is_ended_before_the_profile_goes():
     child is real and carries the session's token, as the browser's children
     do; on Windows its open file is what makes the removal fail, on Linux
     deleting an open file succeeds and the test still asks that the child was
-    ended."""
+    ended. The grace a sender gets (B266) is shortened: this child never
+    finishes, and what is asked here is that it is ended after it."""
+    monkeypatch.setattr(_profile, "SENDER_GRACE", 0.5)
     token = SessionToken.mint()
     files = SessionFiles(env=dict(os.environ, **{TOKEN_VAR: token.value}))
     assert files.token == token
