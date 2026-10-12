@@ -14,7 +14,7 @@ import time
 import pytest
 
 from invisible_core.juggler.lifecycle import (
-    Lifecycle, NavigationError, IDLE_QUIET)
+    Lifecycle, NavigationError, NavigationInterrupted, IDLE_QUIET)
 from invisible_core.juggler.connection import EventListeners
 
 
@@ -171,15 +171,16 @@ def test_a_navigation_that_REPLACES_ours_after_commit_closes_the_wait():
     assert v.frames["F1"].url == "http://a/next"
 
 
-def test_a_navigation_from_BEFORE_ours_does_not_count_even_once_both_are_known():
-    """The other side of the same line: numbering the navigations must not turn
-    an OLDER one into a successor.
+def test_a_navigation_from_BEFORE_ours_that_commits_after_it_replaced_ours():
+    """The other side of the same line: a document that is not ours must not
+    satisfy the wait, and when it commits in ours' place the wait must SAY so.
 
-    P is the page we are leaving, A is ours and has started. An event of P's
-    that arrives late puts P back as the frame's current navigation, with a
-    load. The wait for A must not settle for it: P came BEFORE A, which is the
-    2026-08-27 defect in its second form. Accepting any navigation that is
-    merely different from ours would pass this, and must not.
+    P is the page we are leaving, A is ours and has started; then P commits,
+    with a load. Recorded on firefox-41 on 2026-10-12 (P a `location.replace`
+    of the previous page, A a `goto` sent while it was in flight): P's document
+    stayed, and A was never heard of again - no commit, no abort. Settling for
+    P's load would return a page that is not ours; waiting for A waited for
+    the timeout, 45 s in the MCP server. Known-bad: either of the two.
     """
     c, v = lifecycle()
     events(v,
@@ -190,10 +191,11 @@ def test_a_navigation_from_BEFORE_ours_does_not_count_even_once_both_are_known()
                                          "url": "http://p/", "name": ""}),
            ("Page.eventFired", {"frameId": "F1", "name": "load"}))
     assert v.frames["F1"].navigation == "P"
-    assert not v.frames["F1"].follows("A")
-    with pytest.raises(TimeoutError) as e:
-        v.wait_for_state("F1", "load", navigation="A", timeout=0.3)
-    assert "not our" in str(e.value), e.value
+    started = time.monotonic()
+    with pytest.raises(NavigationInterrupted) as e:
+        v.wait_for_state("F1", "load", navigation="A", timeout=5)
+    assert time.monotonic() - started < 1, "it waited instead of saying so"
+    assert 'interrupted by another navigation to "http://p/"' in str(e.value), e.value
 
 
 def test_sameDocumentNavigation_does_NOT_reset_the_states():
@@ -414,7 +416,9 @@ def test_networkidle_is_born_once_and_announced_without_anyone_waiting():
            ("Network.requestFinished", {"requestId": "R"}),
            ("Page.eventFired", {"frameId": "F1", "name": "load"}))
     time.sleep(IDLE_QUIET * 3)
-    assert heard == [("networkidle", "F1")], heard
+    # The frame's birth is announced too, since 41.36.0: the frame tree is the
+    # lifecycle's, and a client builds its frames from these announcements.
+    assert heard == [("frameAttached", "F1"), ("networkidle", "F1")], heard
     assert "networkidle" in v.frames["F1"].states
 
     # A later request does not take it back (Playwright fires it once per
@@ -423,7 +427,7 @@ def test_networkidle_is_born_once_and_announced_without_anyone_waiting():
     assert "networkidle" in v.frames["F1"].states
     events(v, ("Page.navigationStarted", {"frameId": "F1", "navigationId": "N1"}))
     assert "networkidle" not in v.frames["F1"].states
-    assert heard == [("networkidle", "F1")], heard
+    assert heard == [("frameAttached", "F1"), ("networkidle", "F1")], heard
 
 
 def test_a_same_document_goto_answers_after_the_engine_reports_it():
