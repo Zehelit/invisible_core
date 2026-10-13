@@ -552,6 +552,9 @@ class Connection(EventListeners):
 
         It is not for commands whose RESULT matters, and not for commands
         whose FAILURE matters either: an error reply is dropped with the rest.
+        Releasing an object is the other such command
+        (`InjectedScript.dispose`, `release`): until 41.38.0 it waited up to
+        5 s for an answer nobody read.
         """
         if self._closed:
             return
