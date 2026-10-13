@@ -342,6 +342,24 @@ def derive_max_touch_points(gpu_class: str, seed: int) -> int:
     return int(row[-1]["value"])
 
 
+def derive_media_enumeration_ms(seed: int) -> int:
+    """How long the session's first `navigator.mediaDevices.enumerateDevices()`
+    takes, in milliseconds ([B300]). The engine answers it after this long and
+    no longer asks the host's audio stack for its speakers, whose time it was:
+    measured 287-351 ms on our Windows build and 15-38 ms on our Linux one.
+
+    The range is what retail Windows Firefox 151 took on the machine of the
+    measurement, in the two states that machine was found in on the same day
+    (2026-10-13): 249-278 ms on the first enumeration of a session in the
+    morning (251-255 with fake devices), 510-637 ms in the evening (510-521
+    with fake devices), eight runs each, no change to Firefox in between. The
+    time is the audio stack's, so it moves with the host's state, and one
+    machine already spans 240-640; other machines are not measured. Its own
+    stream, like `derive_max_touch_points`, so it moves no other field.
+    """
+    return random.Random("media_enumeration_ms:%d" % int(seed)).randint(240, 640)
+
+
 class Forge:
     """Fingerprint forge - single seed → coherent bundle."""
 
@@ -406,6 +424,9 @@ class Forge:
             "max_touch_points": derive_max_touch_points(
                 bundle["gpu_class"], self.seed
             ),
+            # The first enumerateDevices() time, from its own stream. See
+            # derive_media_enumeration_ms.
+            "media_enumeration_ms": derive_media_enumeration_ms(self.seed),
             # Independent marginals
             "dark_theme": int(bundle["dark_theme"]),
             # Bayesian browsing history (per-class P(visited|gpu_class)).
