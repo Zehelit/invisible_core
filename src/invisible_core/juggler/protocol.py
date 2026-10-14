@@ -475,6 +475,8 @@ COMMANDS = {'Browser.addBinding': {'params': {'fields': {'browserContextId': {'k
  'Page.dispatchWheelEvent': {'params': {'fields': {'deltaX': {'k': 'Number'},
                                                    'deltaY': {'k': 'Number'},
                                                    'deltaZ': {'k': 'Number'},
+                                                   'latency': {'k': 'Optional',
+                                                               'of': {'k': 'Number'}},
                                                    'modifiers': {'k': 'Number'},
                                                    'x': {'k': 'Number'},
                                                    'y': {'k': 'Number'}},

@@ -108,6 +108,9 @@ class Actions:
     #: The session's input latency ([B299]), or None when humanising is off;
     #: a class default for the same benches: None is "born at the dispatch".
     input_latency = None
+    #: The page's counter of draws, which `born` reads only with a latency;
+    #: None for the same benches.
+    acts = None
     #: No generator means every approach is one event, and no budget: class
     #: defaults for a bench that builds this object without `__init__`.
     motion = None
@@ -1167,11 +1170,14 @@ class Actions:
                              delay_ms=delay_ms)
 
     def wheel(self, dx: float, dy: float) -> None:
-        """`mouse.wheel`, from where the pointer IS - not from 0,0."""
+        """`mouse.wheel`, from where the pointer IS - not from 0,0, and born
+        a few ms before the page sees it, as the mouse is ([B301])."""
+        from ._behaviour import born
         self.c.send("Page.dispatchWheelEvent",
-                    {"x": self.position[0], "y": self.position[1],
-                     "deltaX": dx, "deltaY": dy, "deltaZ": 0,
-                     "modifiers": self.keyboard.modifier_mask()},
+                    born({"x": self.position[0], "y": self.position[1],
+                          "deltaX": dx, "deltaY": dy, "deltaZ": 0,
+                          "modifiers": self.keyboard.modifier_mask()},
+                         self.input_latency, self.acts),
                     session=self.session, timeout=None)
 
     def _click_at_point(self, point, *, button: int = 0,
@@ -1401,8 +1407,8 @@ class Actions:
             p["landsOn"] = {"frameId": frame_id, "objectId": element}
         # Born a few ms before the page sees it, as a system's event is
         # (`InputLatency`, [B299]); the engine keeps the births in order.
-        if self.input_latency is not None:
-            p["latency"] = self.input_latency.draw(self.acts.next("latency"))
+        from ._behaviour import born
+        born(p, self.input_latency, self.acts)
         # No bound of its own: the engine answers once the page has handled
         # the event, and bounds that wait itself (`_awaitInputHandled`, 5 s).
         answer = self.c.send("Page.dispatchMouseEvent", p,
